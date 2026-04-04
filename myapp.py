@@ -32,20 +32,6 @@ st.markdown("""
     .type-text { background: #dbeafe; color: #1e40af; }
     .type-bool { background: #fef3c7; color: #92400e; }
     .type-other { background: #f3f4f6; color: #374151; }
-    .warning-box {
-        background: #fff3cd;
-        border-left: 4px solid #ffc107;
-        padding: 10px 15px;
-        border-radius: 4px;
-        margin: 5px 0;
-    }
-    .danger-box {
-        background: #f8d7da;
-        border-left: 4px solid #dc3545;
-        padding: 10px 15px;
-        border-radius: 4px;
-        margin: 5px 0;
-    }
     .success-box {
         background: #d4edda;
         border-left: 4px solid #28a745;
@@ -129,6 +115,16 @@ if not uploaded_files:
 else:
     # ---- LOAD SELECTED FILE ----
     df = pd.read_csv(selected_file)
+
+    # Auto-convert columns that look numeric but are stored as text
+    # e.g. "$10,819" or "1,234.56" → actual numbers
+    for col in df.select_dtypes(include="object").columns:
+        cleaned = df[col].astype(str).str.replace(r'[\$,\s]', '', regex=True)
+        try:
+            converted = pd.to_numeric(cleaned, errors='raise')
+            df[col] = converted
+        except (ValueError, TypeError):
+            pass  # keep as text if conversion fails
 
     st.title(f"📊 {selected_file_name}")
     st.markdown(f"Analyzing **{len(df):,} rows** × **{len(df.columns)} columns**")
@@ -217,6 +213,8 @@ else:
     with tab3:
         st.subheader("Numeric Columns — Statistics Summary")
         num_df = df.select_dtypes(include="number")
+        # Drop columns where ALL values are null — nothing useful to show
+        num_df = num_df.dropna(axis=1, how="all")
         if not num_df.empty:
             st.dataframe(num_df.describe().round(2), use_container_width=True)
         else:
@@ -271,7 +269,7 @@ else:
 
         filtered_df = df.copy()
 
-        # Apply keyword search
+        # ── Keyword search across all columns ──
         if search_keyword:
             mask = filtered_df.apply(
                 lambda row: row.astype(str).str.contains(search_keyword, case=False).any(),
@@ -279,31 +277,66 @@ else:
             )
             filtered_df = filtered_df[mask]
 
-        # Apply column filter
+        # ── Filter by column — range slider for numeric, dropdown for text ──
         if filter_col != "None":
-            unique_vals = df[filter_col].dropna().unique().tolist()
-            selected_val = st.selectbox(f"Select value for '{filter_col}':", unique_vals)
-            filtered_df = filtered_df[filtered_df[filter_col] == selected_val]
+            col_data = df[filter_col].dropna()
 
-        # Apply sort
+            if pd.api.types.is_numeric_dtype(df[filter_col]):
+                # Numeric column → show range slider
+                col_min = float(col_data.min())
+                col_max = float(col_data.max())
+
+                if col_min == col_max:
+                    st.info(f"Column '{filter_col}' has only one value: {col_min}")
+                else:
+                    range_vals = st.slider(
+                        f"📊 Range for '{filter_col}'",
+                        min_value=col_min,
+                        max_value=col_max,
+                        value=(col_min, col_max),
+                        help=f"Drag to filter rows where {filter_col} falls in this range"
+                    )
+                    filtered_df = filtered_df[
+                        (filtered_df[filter_col] >= range_vals[0]) &
+                        (filtered_df[filter_col] <= range_vals[1])
+                    ]
+                    st.caption(f"🔢 Filtering: **{filter_col}** between **{range_vals[0]:,.2f}** and **{range_vals[1]:,.2f}**")
+
+            else:
+                # Text / categorical column → dropdown as before
+                unique_vals = col_data.unique().tolist()
+                selected_val = st.selectbox(f"Select value for '{filter_col}':", ["All"] + unique_vals)
+                if selected_val != "All":
+                    filtered_df = filtered_df[filtered_df[filter_col] == selected_val]
+
+        # ── Sort by column — range slider preview for numeric ──
         if sort_col != "None":
             ascending = sort_order == "Ascending"
             filtered_df = filtered_df.sort_values(sort_col, ascending=ascending)
+
+            # Show min–max range info for the sorted column
+            if pd.api.types.is_numeric_dtype(df[sort_col]):
+                s_min = filtered_df[sort_col].min()
+                s_max = filtered_df[sort_col].max()
+                st.caption(f"📈 Sorted by **{sort_col}** ({sort_order}) — Range in view: **{s_min:,.2f}** → **{s_max:,.2f}**")
 
         st.caption(f"Showing **{len(filtered_df):,}** of **{len(df):,}** rows")
         st.dataframe(filtered_df, use_container_width=True)
 
     # ==========================================
-    # TAB 5 — DATA QUALITY
+    # TAB 5 — DATA QUALITY  (clean table style, no red/yellow boxes)
     # ==========================================
     with tab5:
         st.subheader("🧹 Data Quality Report")
 
         # --- Duplicates ---
-        dup_count = df.duplicated().sum()
         st.markdown("#### 🔁 Duplicate Rows")
+        dup_count = df.duplicated().sum()
         if dup_count > 0:
-            st.markdown(f'<div class="danger-box">⚠️ Found <b>{dup_count}</b> duplicate rows!</div>', unsafe_allow_html=True)
+            st.dataframe(
+                pd.DataFrame([{"Status": "⚠️ Issue Found", "Details": f"{dup_count} duplicate row(s) detected"}]),
+                use_container_width=True, hide_index=True
+            )
             if st.checkbox("Preview duplicate rows"):
                 st.dataframe(df[df.duplicated(keep=False)], use_container_width=True)
         else:
@@ -311,18 +344,23 @@ else:
 
         st.markdown("---")
 
-        # --- All-null columns ---
+        # --- All-null columns — clean table, NO red boxes ---
         st.markdown("#### ❌ Columns with ALL Null Values")
         all_null_cols = [col for col in df.columns if df[col].isnull().all()]
         if all_null_cols:
-            for col in all_null_cols:
-                st.markdown(f'<div class="danger-box">🚨 Column <b>"{col}"</b> has ALL null values!</div>', unsafe_allow_html=True)
+            null_table = pd.DataFrame({
+                "Column Name": all_null_cols,
+                "Null Count": [df[c].isnull().sum() for c in all_null_cols],
+                "Null %": ["100.0%" for _ in all_null_cols],
+                "Recommendation": ["Drop this column" for _ in all_null_cols]
+            })
+            st.dataframe(null_table, use_container_width=True, hide_index=True)
         else:
             st.markdown('<div class="success-box">✅ No fully-null columns found!</div>', unsafe_allow_html=True)
 
         st.markdown("---")
 
-        # --- High cardinality ---
+        # --- High cardinality — clean table, NO yellow boxes ---
         st.markdown("#### 🔢 High Cardinality Columns")
         st.caption("Columns where unique values > 50% of total rows — may not be useful for grouping")
         threshold = 0.5
@@ -330,25 +368,34 @@ else:
         for col in df.select_dtypes(include="object").columns:
             ratio = df[col].nunique() / len(df)
             if ratio > threshold:
-                high_card.append((col, df[col].nunique(), f"{ratio * 100:.1f}%"))
+                high_card.append({
+                    "Column Name": col,
+                    "Unique Values": df[col].nunique(),
+                    "Uniqueness %": f"{ratio * 100:.1f}%",
+                    "Recommendation": "Avoid using for grouping"
+                })
 
         if high_card:
-            hc_df = pd.DataFrame(high_card, columns=["Column", "Unique Values", "Uniqueness %"])
-            for _, row in hc_df.iterrows():
-                st.markdown(f'<div class="warning-box">⚠️ <b>"{row["Column"]}"</b> has {row["Unique Values"]} unique values ({row["Uniqueness %"]})</div>', unsafe_allow_html=True)
+            st.dataframe(
+                pd.DataFrame(high_card),
+                use_container_width=True, hide_index=True
+            )
         else:
             st.markdown('<div class="success-box">✅ No high cardinality columns found!</div>', unsafe_allow_html=True)
 
         st.markdown("---")
 
-        # --- Missing value summary ---
+        # --- Missing value summary — clean table, NO yellow boxes ---
         st.markdown("#### ⚠️ Columns with Missing Values")
         miss_cols = df.columns[df.isnull().any()].tolist()
         if miss_cols:
-            for col in miss_cols:
-                cnt = df[col].isnull().sum()
-                pct = round(cnt / len(df) * 100, 1)
-                st.markdown(f'<div class="warning-box">⚠️ <b>"{col}"</b> — {cnt} missing values ({pct}%)</div>', unsafe_allow_html=True)
+            missing_table = pd.DataFrame({
+                "Column Name": miss_cols,
+                "Missing Count": [df[c].isnull().sum() for c in miss_cols],
+                "Missing %": [f"{round(df[c].isnull().sum() / len(df) * 100, 1)}%" for c in miss_cols],
+                "Non-Null Count": [df[c].notnull().sum() for c in miss_cols]
+            })
+            st.dataframe(missing_table, use_container_width=True, hide_index=True)
         else:
             st.markdown('<div class="success-box">✅ No missing values found!</div>', unsafe_allow_html=True)
 
@@ -358,8 +405,11 @@ else:
     with tab6:
         st.subheader("📉 Advanced Visualizations")
 
-        num_cols_list = df.select_dtypes(include="number").columns.tolist()
-        cat_cols_list = df.select_dtypes(include="object").columns.tolist()
+        # Only exclude numeric columns where every single value is null
+        num_cols_list = [c for c in df.select_dtypes(include="number").columns
+                         if df[c].isnull().sum() < len(df)]
+        cat_cols_list = [c for c in df.select_dtypes(include="object").columns
+                         if df[c].isnull().sum() < len(df)]
 
         chart_type = st.radio(
             "Select Chart Type:",
@@ -367,7 +417,6 @@ else:
             horizontal=True
         )
 
-        # --- Histogram ---
         if chart_type == "📊 Histogram":
             if num_cols_list:
                 col = st.selectbox("Select numeric column:", num_cols_list)
@@ -375,7 +424,6 @@ else:
             else:
                 st.info("No numeric columns found!")
 
-        # --- Box Plot ---
         elif chart_type == "📦 Box Plot":
             if num_cols_list:
                 col = st.selectbox("Select numeric column:", num_cols_list)
@@ -401,19 +449,20 @@ else:
             else:
                 st.info("No numeric columns found!")
 
-        # --- Correlation Matrix ---
         elif chart_type == "🔥 Correlation Matrix":
-            if len(num_cols_list) >= 2:
-                corr = df[num_cols_list].corr().round(2)
+            # Drop all-null columns first — they produce None values which render as black
+            clean_num = df[num_cols_list].dropna(axis=1, how="all")
+            valid_cols = clean_num.columns.tolist()
+            if len(valid_cols) >= 2:
+                corr = clean_num[valid_cols].corr().round(2)
                 st.dataframe(
                     corr.style.background_gradient(cmap="RdYlGn", axis=None).format("{:.2f}"),
                     use_container_width=True
                 )
                 st.caption("🟢 Green = Strong positive | 🔴 Red = Strong negative | White = No correlation")
             else:
-                st.info("Need at least 2 numeric columns for correlation!")
+                st.info("Need at least 2 numeric columns with actual data for correlation!")
 
-        # --- Missing Value Heatmap ---
         elif chart_type == "🗺 Missing Value Heatmap":
             miss_map = df.isnull().sum().reset_index()
             miss_map.columns = ["Column", "Missing Count"]
@@ -427,7 +476,6 @@ else:
             else:
                 st.success("✅ No missing values — your data is clean!")
 
-        # --- Bar Chart ---
         elif chart_type == "📈 Bar Chart":
             if cat_cols_list:
                 col = st.selectbox("Select categorical column:", cat_cols_list)
@@ -444,7 +492,6 @@ else:
 
         col1, col2, col3 = st.columns(3)
 
-        # --- Schema CSV ---
         with col1:
             st.markdown("#### 🗂 Schema CSV")
             st.caption("Column names, types, null counts")
@@ -463,7 +510,6 @@ else:
                 mime="text/csv"
             )
 
-        # --- Statistics CSV ---
         with col2:
             st.markdown("#### 📈 Statistics CSV")
             st.caption("Mean, std, min, max, percentiles")
@@ -479,7 +525,6 @@ else:
             else:
                 st.info("No numeric columns to export!")
 
-        # --- Full Data CSV ---
         with col3:
             st.markdown("#### 📋 Full Data CSV")
             st.caption("Download complete dataset as CSV")
@@ -492,7 +537,6 @@ else:
 
         st.markdown("---")
 
-        # --- Quality Report ---
         st.markdown("#### 🧹 Data Quality Report CSV")
         quality_data = []
         quality_data.append({"Check": "Total Rows", "Result": len(df), "Status": "Info"})
