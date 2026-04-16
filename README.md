@@ -1,7 +1,7 @@
 # Data Explorer Pro - Snowflake Streamlit App
 
 ## App Name
-SHRINIVASJAMBAGI
+DATA EXPLORER PRO
 
 ## Description
 This is a Snowflake Streamlit application for data exploration and analysis.
